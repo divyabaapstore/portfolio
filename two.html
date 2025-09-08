@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Excel → Preview → Export (PDF / Excel)</title>
+  <style>
+    :root{font-family:Inter,system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial;margin:0}
+    body{padding:20px;background:#f6f7fb;color:#222}
+    .card{background:#fff;border-radius:10px;padding:18px;box-shadow:0 6px 18px rgba(20,24,40,0.06);max-width:1200px;margin:0 auto}
+    h1{font-size:20px;margin:0 0 10px}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .col{flex:1 1 220px}
+    label{display:block;font-size:12px;color:#555;margin-bottom:6px}
+    select,input[type=file],input[type=number],button{padding:8px 10px;border-radius:8px;border:1px solid #ddd;background:#fff}
+    button{cursor:pointer}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{border:1px solid #eee;padding:8px;text-align:left;font-size:13px;vertical-align:middle}
+    th{background:#fafafa}
+    img.preview-img{max-width:90px;max-height:60px;object-fit:cover;border-radius:6px}
+    .controls{display:flex;gap:8px;align-items:center;margin-top:12px}
+    .note{font-size:12px;color:#666;margin-top:8px}
+    .pagination{margin-top:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+    .pagination button{padding:4px 8px;font-size:12px}
+    .search-boxes{margin:10px 0;display:flex;gap:10px;flex-wrap:wrap}
+    .search-boxes input{padding:6px 10px;border-radius:6px;border:1px solid #ddd}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Excel → Preview → Export</h1>
+    <p class="note">Columns expected: <strong>s.no, Product Name, SKU, Image Link, MRP Price, Wholesale price, Vendor Price, Quantity, Vendor Name, Vendor SKU, batch_no</strong>.</p>
+
+    <div class="row">
+      <div class="col">
+        <label for="file">Choose Excel file (.xlsx, .xls, .csv)</label>
+        <input id="file" type="file" accept=".xlsx,.xls,.csv" />
+      </div>
+      <div class="col">
+        <label>Detected sheet</label>
+        <select id="sheetSelect"></select>
+      </div>
+      <div class="col">
+        <label>&nbsp;</label>
+        <div class="controls">
+          <button id="btnMap">Auto-detect & Load columns</button>
+          <button id="btnPreview">Load Preview</button>
+        </div>
+      </div>
+    </div>
+
+    <hr />
+
+    <div id="mappingArea" style="display:none">
+      <h3 style="font-size:15px;margin:8px 0">Column mapping (remap if auto-detect incorrect)</h3>
+      <div class="row" id="mappingRow"></div>
+    </div>
+
+    <div class="search-boxes" style="display:none" id="searchArea">
+      <input type="text" id="searchSku" placeholder="Search by SKU" />
+      <input type="text" id="searchVendor" placeholder="Search by Vendor Name" />
+    </div>
+
+    <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button id="exportExcel" disabled>Export Table → Excel</button>
+      <button id="exportPdf" disabled>Export Preview → PDF (Zip)</button>
+      <button id="downloadCsv" disabled>Download CSV (Preview)</button>
+      <label for="chunkSize" style="font-size:12px;color:#555">Rows per PDF:</label>
+      <input type="number" id="chunkSize" value="100" min="50" style="width:100px" />
+      <div style="flex:1"></div>
+    </div>
+
+    <div id="previewWrapper" style="margin-top:16px">
+      <div id="preview" style="overflow:auto;background:#fff;padding:8px;border-radius:8px;border:1px solid #f0f0f0">
+        <p class="note">No preview loaded.</p>
+      </div>
+      <div class="pagination" id="pagination"></div>
+    </div>
+
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+
+  <script>
+    const expectedFields = [
+      {key:'sno', labels:['s.no','s no','sn','sno','s. no','sr','sr. no','sl']},
+      {key:'product_name', labels:['product name','name','product']},
+      {key:'sku', labels:['sku','product sku','item code']},
+      {key:'image', labels:['image link','image','image url','image_url','img','image link (like jpg, webp images)']},
+      {key:'mrp_price', labels:['mrp price','mrp','retail price','list price']},
+      {key:'wholesale_price', labels:['wholesale price','wholesale_price','wholesale']},
+      {key:'vendor_price', labels:['vendor price','vendor_price','vendorprice']},
+      {key:'quantity', labels:['quantity','qty','quant']},
+      {key:'vendor_name', labels:['vendor name','vendor_name','vendor']},
+      {key:'vendor_sku', labels:['vendor sku','vendorsku','supplier sku']},
+      {key:'batch_no', labels:['batch no','batch number','batch']}
+    ];
+
+    let workbook=null,sheetJson=[],headerKeys=[],mappedFields=[],filteredRows=[],currentPage=1;
+    const rowsPerPage=10;
+
+    const fileInput=document.getElementById('file');
+    const sheetSelect=document.getElementById('sheetSelect');
+    const btnMap=document.getElementById('btnMap');
+    const btnPreview=document.getElementById('btnPreview');
+    const mappingArea=document.getElementById('mappingArea');
+    const mappingRow=document.getElementById('mappingRow');
+    const preview=document.getElementById('preview');
+    const exportExcelBtn=document.getElementById('exportExcel');
+    const exportPdfBtn=document.getElementById('exportPdf');
+    const downloadCsvBtn=document.getElementById('downloadCsv');
+    const pagination=document.getElementById('pagination');
+    const searchArea=document.getElementById('searchArea');
+    const searchSku=document.getElementById('searchSku');
+    const searchVendor=document.getElementById('searchVendor');
+    const chunkSizeInput=document.getElementById('chunkSize');
+
+    fileInput.addEventListener('change',async e=>{
+      const f=e.target.files[0]; if(!f) return;
+      const data=await f.arrayBuffer();
+      workbook=XLSX.read(data);
+      populateSheetSelect();
+      mappingArea.style.display='none';
+      preview.innerHTML='<p class="note">Sheet loaded. Click "Auto-detect & Load columns".</p>';
+      exportExcelBtn.disabled=exportPdfBtn.disabled=downloadCsvBtn.disabled=true;
+      searchArea.style.display='none';
+    });
+
+    function populateSheetSelect(){
+      sheetSelect.innerHTML='';
+      workbook.SheetNames.forEach(name=>{
+        const opt=document.createElement('option'); opt.value=name; opt.textContent=name; sheetSelect.appendChild(opt);
+      });
+    }
+
+    btnMap.addEventListener('click',()=>{
+      const ws=workbook.Sheets[sheetSelect.value];
+      const json=XLSX.utils.sheet_to_json(ws,{defval:''});
+      sheetJson=json;
+      headerKeys=json.length?Object.keys(json[0]):[];
+      buildMappingUI();
+    });
+
+    function buildMappingUI(){
+      mappingRow.innerHTML='';
+      mappingArea.style.display='block';
+      expectedFields.forEach(field=>{
+        const col=document.createElement('div'); col.className='col';
+        const label=document.createElement('label'); label.textContent=field.key.replace(/_/g,' ').toUpperCase();
+        const select=document.createElement('select'); select.dataset.field=field.key;
+        const emptyOpt=document.createElement('option'); emptyOpt.value=''; emptyOpt.textContent='-- not mapped --'; select.appendChild(emptyOpt);
+        headerKeys.forEach(h=>{const o=document.createElement('option'); o.value=h;o.textContent=h;select.appendChild(o);});
+        col.appendChild(label); col.appendChild(select); mappingRow.appendChild(col);
+      });
+    }
+
+    btnPreview.addEventListener('click',()=>{
+      if(!sheetJson.length) return alert('No sheet data loaded.');
+      const selects=mappingRow.querySelectorAll('select');
+      const map={}; mappedFields=[];
+      selects.forEach(s=>{if(s.value){map[s.dataset.field]=s.value;mappedFields.push(s.dataset.field);}});
+      const rows=sheetJson.map((r,idx)=>{
+        const obj={}; expectedFields.forEach(f=>{if(map[f.key]) obj[f.key]=r[map[f.key]]||(f.key==='sno'?idx+1:'');});
+        return obj;
+      });
+      sheetJson=rows; filteredRows=[...sheetJson]; currentPage=1;
+      renderPreviewTable();
+      exportExcelBtn.disabled=exportPdfBtn.disabled=downloadCsvBtn.disabled=false;
+      searchArea.style.display='flex';
+    });
+
+    function renderPreviewTable(){
+      let rows=filteredRows;
+      const table=document.createElement('table');
+      const thead=document.createElement('thead');
+      const headerRow=document.createElement('tr');
+      mappedFields.forEach(f=>{const th=document.createElement('th');th.textContent=f.replace(/_/g,' ').toUpperCase();headerRow.appendChild(th);});
+      thead.appendChild(headerRow); table.appendChild(thead);
+      const tbody=document.createElement('tbody');
+      const start=(currentPage-1)*rowsPerPage,end=start+rowsPerPage;
+      rows.slice(start,end).forEach(r=>{
+        const tr=document.createElement('tr');
+        mappedFields.forEach(k=>{
+          const td=document.createElement('td');
+          if(k==='image'&&r[k]) td.innerHTML=`<img src="${r[k]}" class="preview-img" onerror="this.style.opacity=0.6;this.alt='not found'">`;
+          else td.textContent=r[k]||'';
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      preview.innerHTML=''; preview.appendChild(table);
+      renderPagination(rows.length);
+    }
+
+    function renderPagination(total){
+      pagination.innerHTML='';
+      const pages=Math.ceil(total/rowsPerPage);
+      if(pages<=1) return;
+      for(let i=1;i<=pages;i++){
+        const btn=document.createElement('button'); btn.textContent=i;
+        if(i===currentPage) btn.style.fontWeight='bold';
+        btn.addEventListener('click',()=>{currentPage=i;renderPreviewTable();});
+        pagination.appendChild(btn);
+      }
+    }
+
+    searchSku.addEventListener('input',applyFilters);
+    searchVendor.addEventListener('input',applyFilters);
+
+    function applyFilters(){
+      const skuVal=searchSku.value.toLowerCase(),vendorVal=searchVendor.value.toLowerCase();
+      filteredRows=sheetJson.filter(r=>{
+        const skuMatch=!skuVal||(r.sku||'').toLowerCase().includes(skuVal);
+        const vendorMatch=!vendorVal||(r.vendor_name||'').toLowerCase().includes(vendorVal);
+        return skuMatch&&vendorMatch;
+      });
+      currentPage=1; renderPreviewTable();
+    }
+
+    // Excel Export - ALL rows
+    exportExcelBtn.addEventListener('click',()=>{
+      const aoa=[mappedFields.map(f=>f.replace(/_/g,' ').toUpperCase())];
+      filteredRows.forEach(r=>{aoa.push(mappedFields.map(f=>r[f]||''));});
+      const ws=XLSX.utils.aoa_to_sheet(aoa);
+      const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Export');
+      XLSX.writeFile(wb,'exported_preview.xlsx');
+    });
+
+    // CSV Export - ALL rows
+    downloadCsvBtn.addEventListener('click',()=>{
+      const data=filteredRows.map(r=>{const o={}; mappedFields.forEach(f=>o[f]=r[f]||''); return o;});
+      const ws=XLSX.utils.json_to_sheet(data);
+      const csv=XLSX.utils.sheet_to_csv(ws);
+      const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+      saveAs(blob,'preview.csv');
+    });
+
+    // PDF Export - Split into multiple PDFs zipped
+    exportPdfBtn.addEventListener('click',async ()=>{
+      try{
+        let chunkSize=parseInt(chunkSizeInput.value)||100;
+        if(chunkSize<50) chunkSize=50; // minimum safe value
+        const zip=new JSZip();
+        const {jsPDF}=window.jspdf;
+
+        for(let i=0;i<filteredRows.length;i+=chunkSize){
+          const chunk=filteredRows.slice(i,i+chunkSize);
+          const table=document.createElement('table');
+          const thead=document.createElement('thead');
+          const headerRow=document.createElement('tr');
+          mappedFields.forEach(f=>{const th=document.createElement('th'); th.textContent=f.replace(/_/g,' ').toUpperCase(); headerRow.appendChild(th);});
+          thead.appendChild(headerRow); table.appendChild(thead);
+
+          const tbody=document.createElement('tbody');
+          chunk.forEach(r=>{
+            const tr=document.createElement('tr');
+            mappedFields.forEach(k=>{
+              const td=document.createElement('td');
+              if(k==='image'&&r[k]) td.innerHTML=`<img src="${r[k]}" class="preview-img">`;
+              else td.textContent=r[k]||'';
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+          });
+          table.appendChild(tbody);
+
+          const tempDiv=document.createElement('div');
+          tempDiv.style.position='fixed'; tempDiv.style.left='-9999px';
+          tempDiv.appendChild(table); document.body.appendChild(tempDiv);
+
+          const canvas=await html2canvas(table,{scale:2,useCORS:true});
+          const imgData=canvas.toDataURL('image/png');
+          const pdf=new jsPDF('l','pt','a4');
+          const pageWidth=pdf.internal.pageSize.getWidth();
+          const pageHeight=pdf.internal.pageSize.getHeight();
+          const imgWidth=pageWidth;
+          const imgHeight=canvas.height*pageWidth/canvas.width;
+
+          let heightLeft=imgHeight,position=0;
+          pdf.addImage(imgData,'PNG',0,position,imgWidth,imgHeight);
+          heightLeft-=pageHeight;
+          while(heightLeft>0){
+            position-=pageHeight;
+            pdf.addPage();
+            pdf.addImage(imgData,'PNG',0,position,imgWidth,imgHeight);
+            heightLeft-=pageHeight;
+          }
+
+          const pdfBlob=pdf.output('blob');
+          zip.file(`part_${Math.floor(i/chunkSize)+1}.pdf`,pdfBlob);
+          document.body.removeChild(tempDiv);
+        }
+
+        const zipBlob=await zip.generateAsync({type:'blob'});
+        saveAs(zipBlob,'preview_pdfs.zip');
+      }catch(err){console.error(err); alert('PDF export failed');}
+    });
+  </script>
+</body>
+</html>
